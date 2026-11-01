@@ -1,0 +1,193 @@
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="theme-color" content="#0f172a">
+  <title>Sesli Yapay Zeka Asistanı</title>
+  <style>
+    *{box-sizing:border-box;margin:0;padding:0;font-family:'Segoe UI',Tahoma,Geneva,Verdana,sans-serif}
+    body{min-height:100vh;min-height:100dvh;background:linear-gradient(135deg,#0f172a,#1e293b);color:#f8fafc;display:flex;align-items:center;justify-content:center;padding:20px}
+    .container{width:100%;max-width:600px;background:rgba(30,41,59,.85);backdrop-filter:blur(10px);border:1px solid rgba(255,255,255,.12);border-radius:24px;padding:clamp(20px,5vw,32px);box-shadow:0 10px 25px rgba(0,0,0,.5);text-align:center}
+    h1{font-size:clamp(1.6rem,5vw,2.3rem);margin-bottom:12px;color:#38bdf8}
+    .subtitle{color:#94a3b8;font-size:1rem;line-height:1.5;margin-bottom:25px}
+    .chat-box{background:#0f172a;border-radius:14px;min-height:250px;max-height:42vh;overflow-y:auto;padding:16px;text-align:left;margin-bottom:22px;border:1px solid #334155;display:flex;flex-direction:column;gap:10px}
+    .message{padding:11px 14px;border-radius:10px;max-width:88%;font-size:1rem;line-height:1.45;overflow-wrap:anywhere}
+    .user-msg{background:#0284c7;color:#fff;align-self:flex-end}.ai-msg{background:#334155;color:#e2e8f0;align-self:flex-start}
+    .controls{display:flex;justify-content:center;gap:12px;flex-wrap:wrap}
+    button{background:#0284c7;color:white;border:0;padding:14px 26px;font-size:1.05rem;border-radius:30px;cursor:pointer;font-weight:700;box-shadow:0 4px 12px rgba(2,132,199,.4)}
+    button:disabled{opacity:.65;cursor:not-allowed}button.listening{background:#dc2626;animation:pulse 1.5s infinite}
+    @keyframes pulse{0%{transform:scale(1);box-shadow:0 0 0 0 rgba(239,68,68,.6)}70%{transform:scale(1.04);box-shadow:0 0 0 10px rgba(239,68,68,0)}100%{transform:scale(1);box-shadow:0 0 0 0 rgba(239,68,68,0)}}
+    .status{margin-top:18px;font-size:.95rem;color:#7dd3fc;line-height:1.5;overflow-wrap:anywhere}.status.error{color:#fca5a5}.hint{margin-top:12px;color:#94a3b8;font-size:.82rem;line-height:1.5}
+  </style>
+</head>
+<body>
+  <main class="container">
+    <h1>Sesli Yapay Zeka Asistanı</h1>
+    <p class="subtitle">Komutlarını dinler ve tanımlı komutlara sesli yanıt verir.</p>
+    <div class="chat-box" id="chatBox" aria-live="polite">
+      <div class="message ai-msg">Merhaba! Dinlemeye hazırım. Bana ne yapmak istediğini söyleyebilirsin.</div>
+    </div>
+    <div class="controls">
+      <button id="micBtn" type="button">🎤 Dinlemeyi Başlat</button>
+    </div>
+    <div class="status" id="statusText">Asistan beklemede.</div>
+    <p class="hint">Mikrofon için sayfanın HTTPS üzerinden açılması ve tarayıcıda mikrofon izninin verilmesi gerekir. Dosyayı telefonda doğrudan açmak yerine GitHub Pages gibi HTTPS destekli bir adrese yükleyin.</p>
+  </main>
+<script>
+(() => {
+  const chatBox = document.getElementById('chatBox');
+  const micBtn = document.getElementById('micBtn');
+  const statusText = document.getElementById('statusText');
+  const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+  let recognition = null;
+  let isListening = false;
+  let starting = false;
+
+  function setStatus(message, isError = false) {
+    statusText.textContent = message;
+    statusText.classList.toggle('error', isError);
+  }
+  function appendMessage(message, className) {
+    const div = document.createElement('div');
+    div.className = `message ${className}`;
+    div.textContent = message;
+    chatBox.appendChild(div);
+    chatBox.scrollTop = chatBox.scrollHeight;
+  }
+  function resetButton() {
+    isListening = false;
+    starting = false;
+    micBtn.disabled = false;
+    micBtn.classList.remove('listening');
+    micBtn.textContent = '🎤 Dinlemeyi Başlat';
+  }
+  function speak(message) {
+    if (!('speechSynthesis' in window)) return;
+    window.speechSynthesis.cancel();
+    const utterance = new SpeechSynthesisUtterance(message);
+    utterance.lang = 'tr-TR';
+    utterance.rate = 1;
+    utterance.pitch = 1;
+    window.speechSynthesis.speak(utterance);
+  }
+  function explainSpeechError(code) {
+    const messages = {
+      'not-allowed': 'Mikrofon izni engellendi. Chrome adres çubuğundaki site ayarlarından Mikrofon → İzin ver seçin. Sayfayı HTTPS adresinden açın; content:// üzerinden mikrofon çalışmayabilir.',
+      'service-not-allowed': 'Ses tanıma servisine erişim engellendi. Google/Chrome ses hizmetlerini ve internet bağlantısını kontrol edin.',
+      'audio-capture': 'Mikrofon bulunamadı veya başka bir uygulama tarafından kullanılıyor.',
+      'no-speech': 'Ses algılanmadı. Mikrofonunuza konuşup tekrar deneyin.',
+      'network': 'Ses tanıma için internet bağlantısı kurulamadı. İnternetinizi kontrol edip tekrar deneyin.',
+      'language-not-supported': 'Türkçe ses tanıma bu tarayıcıda desteklenmiyor.',
+      'aborted': 'Dinleme durduruldu.'
+    };
+    return messages[code] || `Ses tanıma hatası: ${code}. Chrome mikrofon izinlerini kontrol edin.`;
+  }
+
+  if (!SpeechRecognition) {
+    micBtn.disabled = true;
+    setStatus('Bu tarayıcı ses tanımayı desteklemiyor. Güncel Google Chrome ile HTTPS adresinden açın.', true);
+    return;
+  }
+
+  recognition = new SpeechRecognition();
+  recognition.lang = 'tr-TR';
+  recognition.interimResults = false;
+  recognition.maxAlternatives = 1;
+  recognition.continuous = false;
+
+  recognition.onstart = () => {
+    starting = false;
+    isListening = true;
+    micBtn.disabled = false;
+    micBtn.classList.add('listening');
+    micBtn.textContent = '🛑 Dinlemeyi Durdur';
+    setStatus('Dinliyorum, lütfen konuşun...');
+  };
+  recognition.onresult = event => {
+    const result = event.results && event.results[0] && event.results[0][0];
+    if (!result) return;
+    const spoken = result.transcript.trim();
+    appendMessage(spoken, 'user-msg');
+    processCommand(spoken);
+  };
+  recognition.onerror = event => {
+    setStatus(explainSpeechError(event.error), event.error !== 'aborted');
+    resetButton();
+  };
+  recognition.onend = () => {
+    resetButton();
+    if (!statusText.classList.contains('error')) setStatus('Asistan beklemede. Tekrar konuşmak için düğmeye basın.');
+  };
+
+  async function toggleListening() {
+    if (isListening) {
+      recognition.stop();
+      setStatus('Dinleme durduruluyor...');
+      return;
+    }
+    if (starting) return;
+    if (!window.isSecureContext && location.hostname !== 'localhost' && location.hostname !== '127.0.0.1') {
+      setStatus('Güvenli bağlantı gerekli. Bu sayfayı content:// veya file:// yerine HTTPS adresinden (ör. GitHub Pages) açın.', true);
+      return;
+    }
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+      setStatus('Bu tarayıcı mikrofon erişimini desteklemiyor. Güncel Chrome ve HTTPS kullanın.', true);
+      return;
+    }
+    starting = true;
+    micBtn.disabled = true;
+    setStatus('Mikrofon izni bekleniyor...');
+    let stream;
+    try {
+      // Kullanıcı etkileşimi sırasında mikrofon iznini açıkça iste.
+      stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      stream.getTracks().forEach(track => track.stop());
+      setStatus('Mikrofon hazır. Dinleme başlatılıyor...');
+      recognition.start();
+    } catch (error) {
+      if (stream) stream.getTracks().forEach(track => track.stop());
+      resetButton();
+      if (error && (error.name === 'NotAllowedError' || error.name === 'SecurityError')) {
+        setStatus('Mikrofon izni verilmedi. Chrome → Site ayarları → Mikrofon bölümünden bu siteye izin verin ve sayfayı yenileyin.', true);
+      } else if (error && error.name === 'NotFoundError') {
+        setStatus('Cihazda kullanılabilir mikrofon bulunamadı.', true);
+      } else {
+        setStatus(`Mikrofon başlatılamadı: ${error && error.message ? error.message : 'Bilinmeyen hata'}. Sayfayı HTTPS üzerinden açıp tekrar deneyin.`, true);
+      }
+    }
+  }
+  micBtn.addEventListener('click', toggleListening);
+
+  function processCommand(command) {
+    const cmd = command.toLocaleLowerCase('tr-TR');
+    let reply;
+    if (cmd.includes('merhaba') || cmd.includes('selam')) {
+      reply = 'Aleykümselam! Sana nasıl yardımcı olabilirim?';
+    } else if (cmd.includes('saat kaç')) {
+      const now = new Date();
+      reply = `Şu an saat ${now.getHours()} ${now.getMinutes()} geçiyor.`;
+    } else if (cmd.includes('tarih nedir') || cmd.includes('bugün günlerden')) {
+      reply = `Bugün ${new Date().toLocaleDateString('tr-TR', {weekday:'long', year:'numeric', month:'long', day:'numeric'})}.`;
+    } else if (cmd.includes('google aç')) {
+      reply = 'Google açılıyor.';
+      appendMessage(reply, 'ai-msg'); speak(reply);
+      window.open('https://www.google.com', '_blank', 'noopener');
+      return;
+    } else if (cmd.includes('youtube aç')) {
+      reply = 'YouTube açılıyor.';
+      appendMessage(reply, 'ai-msg'); speak(reply);
+      window.open('https://www.youtube.com', '_blank', 'noopener');
+      return;
+    } else if (cmd.includes('nasılsın')) {
+      reply = 'İyiyim, teşekkür ederim. Sana nasıl yardımcı olabilirim?';
+    } else {
+      reply = `Söylediğini anladım: “${command}”. Bu komut henüz tanımlı değil.`;
+    }
+    appendMessage(reply, 'ai-msg');
+    speak(reply);
+  }
+})();
+</script>
+</body>
+</html>
